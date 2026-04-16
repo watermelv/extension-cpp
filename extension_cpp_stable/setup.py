@@ -25,9 +25,28 @@ else:
     py_limited_api = False
 
 
+def get_torch_npu_build_config():
+    use_npu = os.getenv("USE_NPU", "1") == "1"
+    if not use_npu:
+        return None
+
+    try:
+        import torch_npu
+        from torch_npu.utils.cpp_extension import NpuExtension
+    except ImportError:
+        return None
+
+    torch_npu_dir = os.path.dirname(os.path.realpath(torch_npu.__file__))
+    return {
+        "torch_npu_dir": torch_npu_dir,
+        "NpuExtension": NpuExtension,
+    }
+
+
 def get_extensions():
     debug_mode = os.getenv("DEBUG", "0") == "1"
     use_cuda = os.getenv("USE_CUDA", "1") == "1"
+    npu_config = get_torch_npu_build_config()
     if debug_mode:
         print("Compiling in debug mode")
 
@@ -79,6 +98,44 @@ def get_extensions():
             py_limited_api=py_limited_api,
         )
     ]
+
+    if npu_config is not None:
+        npu_extension_dir = os.path.join(extensions_dir, "npu")
+        npu_sources = list(glob.glob(os.path.join(npu_extension_dir, "*.cpp")))
+        if npu_sources:
+            torch_npu_repo = os.path.abspath(
+                os.getenv(
+                    "PYTORCH_NPU_REPO",
+                    os.path.join(this_dir, "..", "..", "pytorch-npu"),
+                )
+            )
+            local_shim_npu = os.path.join(
+                torch_npu_repo, "torch_npu", "csrc", "inductor", "aoti_torch", "shim_npu.cpp"
+            )
+            if os.path.exists(local_shim_npu):
+                npu_sources.append(local_shim_npu)
+
+            npu_compile_args = [
+                "-O3" if not debug_mode else "-O0",
+                "-fdiagnostics-color=always",
+                "-DUSE_NPU",
+            ]
+            npu_link_args = [
+                f"-Wl,-rpath,{os.path.join(npu_config['torch_npu_dir'], 'lib')}",
+            ]
+            if debug_mode:
+                npu_compile_args.append("-g")
+                npu_link_args.extend(["-O0", "-g"])
+
+            ext_modules.append(
+                npu_config["NpuExtension"](
+                    f"{library_name}._C_npu_test",
+                    npu_sources,
+                    include_dirs=[torch_npu_repo],
+                    extra_compile_args=npu_compile_args,
+                    extra_link_args=npu_link_args,
+                )
+            )
 
     return ext_modules
 
